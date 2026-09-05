@@ -78,7 +78,10 @@ targets:
         embed: true
       # A companion watch application belongs in the standard Watch bundle location.
       # PlugIns is for extension products and breaks paired watch installation.
-      - target: OpenClawWatchApp
+      # TODO(tyler-selfbuild): Watch app temporarily excluded — its native Rust
+      # WebRTC (-Z build-std) compile hangs/slows the arm64 runner. Re-enable after
+      # first working iPhone-only TestFlight build.
+      # - target: OpenClawWatchApp
       - package: OpenClawKit
       - package: OpenClawKit
         product: OpenClawChatUI
