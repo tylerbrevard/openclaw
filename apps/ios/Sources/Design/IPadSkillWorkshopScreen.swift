@@ -13,6 +13,8 @@ struct IPadSkillWorkshopScreen: View {
     @State private var statusFilter = "pending"
     @State private var query = ""
     @State private var isLoading = false
+    @State private var loadedAgentScopeID: String?
+    @State private var loadRequestID: UUID?
     @State private var inspectingProposalID: String?
     @State private var busyAction: IPadSkillProposalAction?
     @State private var errorText: String?
@@ -563,7 +565,7 @@ struct IPadSkillWorkshopScreen: View {
         [
             self.canRead ? "connected" : "offline",
             self.scenePhase == .active ? "active" : "inactive",
-            self.selectedAgentScopeID.isEmpty ? "default" : self.selectedAgentScopeID,
+            self.selectedAgentParam ?? "unresolved",
         ].joined(separator: ":")
     }
 
@@ -613,8 +615,15 @@ struct IPadSkillWorkshopScreen: View {
     }
 
     private var selectedAgentParam: String? {
-        let selected = Self.normalizedScopeID(self.selectedAgentScopeID)
-        return selected.isEmpty ? nil : selected
+        Self.resolvedAgentScopeID(
+            selected: self.selectedAgentScopeID,
+            defaultAgentID: self.appModel.gatewayDefaultAgentId)
+    }
+
+    static func resolvedAgentScopeID(selected: String?, defaultAgentID: String?) -> String? {
+        let selected = Self.normalizedScopeID(selected)
+        let resolved = selected.isEmpty ? Self.normalizedScopeID(defaultAgentID) : selected
+        return resolved.isEmpty ? nil : resolved
     }
 
     static func shouldEnableProposalMutation(canWrite: Bool, hasOperatorAdminScope: Bool) -> Bool {
@@ -818,17 +827,33 @@ struct IPadSkillWorkshopScreen: View {
             self.errorText = nil
             return
         }
+        guard let agentID = self.selectedAgentParam else { return }
+        if self.loadedAgentScopeID != agentID {
+            self.loadedAgentScopeID = agentID
+            self.proposals = []
+            self.selectedProposalID = nil
+            self.presentedProposalRoute = nil
+            self.noticeText = nil
+            self.inspectingProposalID = nil
+            self.isLoading = false
+        }
         guard !self.isLoading else { return }
 
+        let requestID = UUID()
+        self.loadRequestID = requestID
         self.isLoading = true
         self.errorText = nil
-        defer { self.isLoading = false }
+        defer {
+            if self.loadRequestID == requestID { self.isLoading = false }
+        }
 
         do {
             let data = try await request(
                 method: "skills.proposals.list",
-                params: IPadSkillProposalListParams(agentId: selectedAgentParam),
+                params: IPadSkillProposalListParams(agentId: agentID),
                 timeoutSeconds: 20)
+            guard !Task.isCancelled, self.loadRequestID == requestID,
+                  self.selectedAgentParam == agentID else { return }
             let response = try JSONDecoder().decode(IPadSkillProposalManifest.self, from: data)
             let previousByID = Dictionary(uniqueKeysWithValues: proposals.map { ($0.id, $0) })
             let next = response.proposals
@@ -840,6 +865,8 @@ struct IPadSkillWorkshopScreen: View {
                 await self.inspect(proposalID: selectedProposalID, force: force)
             }
         } catch {
+            guard !Task.isCancelled, self.loadRequestID == requestID,
+                  self.selectedAgentParam == agentID else { return }
             if force || self.proposals.isEmpty {
                 self.errorText = Self.message(for: error)
             }
@@ -847,30 +874,39 @@ struct IPadSkillWorkshopScreen: View {
     }
 
     private func inspect(proposalID: String, force: Bool) async {
-        guard self.canRead else { return }
+        guard self.canRead, let agentID = self.selectedAgentParam,
+              self.loadedAgentScopeID == agentID else { return }
         guard force || self.proposals.first(where: { $0.id == proposalID })?.content == nil else { return }
         guard self.inspectingProposalID == nil else { return }
 
         self.inspectingProposalID = proposalID
         self.errorText = nil
-        defer { self.inspectingProposalID = nil }
+        defer {
+            if self.selectedAgentParam == agentID, self.inspectingProposalID == proposalID {
+                self.inspectingProposalID = nil
+            }
+        }
 
         do {
             let data = try await request(
                 method: "skills.proposals.inspect",
                 params: SkillsProposalInspectParams(
-                    agentid: selectedAgentParam,
+                    agentid: agentID,
                     proposalid: proposalID),
                 timeoutSeconds: 20)
+            guard !Task.isCancelled, self.selectedAgentParam == agentID else { return }
             let response = try JSONDecoder().decode(IPadSkillProposalInspectResponse.self, from: data)
             self.merge(IPadSkillProposal(inspect: response, previous: self.proposals.first { $0.id == proposalID }))
         } catch {
+            guard !Task.isCancelled, self.selectedAgentParam == agentID else { return }
             self.errorText = Self.message(for: error)
         }
     }
 
     private func run(_ action: IPadSkillProposalAction.Kind, proposal: IPadSkillProposal) async {
-        guard self.canApplyProposalMutations, self.busyAction == nil else { return }
+        guard self.canApplyProposalMutations, self.busyAction == nil,
+              let agentID = self.selectedAgentParam,
+              self.loadedAgentScopeID == agentID else { return }
         guard let preparedAction = IPadSkillProposalAction(kind: action, proposal: proposal) else {
             self.noticeText = nil
             self.errorText = String(localized: "Review the proposal draft before applying or rejecting it.")
@@ -884,15 +920,18 @@ struct IPadSkillWorkshopScreen: View {
         do {
             _ = try await self.request(
                 method: preparedAction.method,
-                params: preparedAction.params(agentID: self.selectedAgentParam),
+                params: preparedAction.params(agentID: agentID),
                 timeoutSeconds: 30)
+            guard self.selectedAgentParam == agentID else { return }
             self.noticeText = preparedAction.kind == .apply
                 ? String(localized: "Proposal applied.")
                 : String(localized: "Proposal rejected.")
             await self.loadProposals(force: true)
         } catch {
+            guard self.selectedAgentParam == agentID else { return }
             let actionError = Self.message(for: error)
             await self.loadProposals(force: true)
+            guard self.selectedAgentParam == agentID else { return }
             self.errorText = actionError
         }
     }
@@ -1174,8 +1213,8 @@ private struct IPadSkillWorkshopAgentScope: Identifiable {
     let title: String
 }
 
-private struct IPadSkillProposalListParams: Encodable {
-    let agentId: String?
+struct IPadSkillProposalListParams: Encodable {
+    let agentId: String
 }
 
 struct IPadSkillProposalInspectResponse: Decodable {

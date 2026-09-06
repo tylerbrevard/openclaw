@@ -402,6 +402,20 @@ struct RootTabsPresentationTests {
         #expect(RootTabs.initialDestination(arguments: ["OpenClaw", "--openclaw-initial-tab", "settings"]) == .settings)
     }
 
+    @Test func `skill workshop default selection sends an explicit owner`() throws {
+        let owner = try #require(IPadSkillWorkshopScreen.resolvedAgentScopeID(
+            selected: "", defaultAgentID: " main "))
+        let payload = try #require(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(IPadSkillProposalListParams(agentId: owner))) as? [String: Any])
+        #expect(payload["agentId"] as? String == "main")
+        #expect(IPadSkillWorkshopScreen.resolvedAgentScopeID(
+            selected: " ops ", defaultAgentID: "main") == "ops")
+        #expect(IPadSkillWorkshopScreen.resolvedAgentScopeID(
+            selected: nil, defaultAgentID: "research") == "research")
+        #expect(IPadSkillWorkshopScreen.resolvedAgentScopeID(
+            selected: "", defaultAgentID: nil) == nil)
+    }
+
     @Test func `skill workshop mutations require admin scope`() {
         #expect(IPadSkillWorkshopScreen.shouldEnableProposalMutation(canWrite: true, hasOperatorAdminScope: true))
         #expect(!IPadSkillWorkshopScreen.shouldEnableProposalMutation(canWrite: true, hasOperatorAdminScope: false))
